@@ -1,46 +1,62 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { getStripe } from "@/lib/stripe";
+import type Stripe from "stripe";
 
-const anthropic = new Anthropic();
+function reassembleFormData(
+  metadata: Stripe.Metadata
+): Record<string, string> {
+  if (metadata.formData) {
+    return JSON.parse(metadata.formData);
+  }
+  const chunks = parseInt(metadata.formDataChunks || "0", 10);
+  if (chunks > 0) {
+    let json = "";
+    for (let i = 0; i < chunks; i++) {
+      json += metadata[`formData_${i}`] || "";
+    }
+    return JSON.parse(json);
+  }
+  return {};
+}
 
-export async function POST(request: Request) {
-  try {
-    const formData = await request.json();
+function buildPrompt(formData: Record<string, string>): string {
+  const state = formData.propertyState || formData.state || "Unknown";
+  return `Generate a formal mechanic's lien document for the state of ${state}.
 
-    const prompt = `Generate a formal mechanic's lien document for the state of ${formData.state}.
-
-This must be a legally formatted document that complies with ${formData.state}'s specific statutory requirements for mechanic's liens. Include all required statutory references and formatting.
+This must be a legally formatted document that complies with ${state}'s specific statutory requirements for mechanic's liens. Include all required statutory references and formatting.
 
 Use the following information:
 
 CLAIMANT (Person/Company Filing the Lien):
-- Name: ${formData.claimantName}
-- Address: ${formData.claimantAddress}
-- Role: ${formData.claimantRole} (e.g., General Contractor, Subcontractor, Material Supplier)
+- Name: ${formData.companyName || ""}
+- Address: ${formData.companyAddress || ""}
+- Role: ${formData.role || ""}
+- License Number: ${formData.licenseNumber || "N/A"}
 
 PROPERTY OWNER:
-- Name: ${formData.propertyOwnerName}
-- Address: ${formData.propertyOwnerAddress}
+- Name: ${formData.propertyOwnerName || ""}
 
 PROPERTY INFORMATION:
-- Property Address: ${formData.propertyAddress}
-- County: ${formData.county}
+- Street: ${formData.propertyStreet || ""}
+- City: ${formData.propertyCity || ""}
+- State: ${state}
+- ZIP: ${formData.propertyZip || ""}
 - Legal Description: ${formData.legalDescription || "To be determined from county records"}
 
 GENERAL CONTRACTOR (if claimant is a subcontractor/supplier):
-- Name: ${formData.generalContractorName || "N/A"}
+- Name: ${formData.gcName || "N/A"}
+- Address: ${formData.gcAddress || "N/A"}
 
 PROJECT INFORMATION:
-- Project Type: ${formData.projectType}
-- Description of Work/Materials: ${formData.workDescription}
-- Contract Amount: $${formData.contractAmount}
-- Amount Paid to Date: $${formData.amountPaid || "0"}
-- Amount Owed (Lien Amount): $${formData.lienAmount}
-- Date Work Commenced: ${formData.workStartDate}
-- Date Last Work Performed: ${formData.lastWorkDate}
+- Project Type: ${formData.projectType || ""}
+- Contract Amount: $${formData.contractAmount || "0"}
+- Amount Owed (Lien Amount): $${formData.amountOwed || "0"}
+- Date Work Commenced: ${formData.firstWorkDate || ""}
+- Date Last Work Performed: ${formData.lastWorkDate || ""}
 
 FORMAT REQUIREMENTS:
-1. Use the state-specific title (e.g., "CLAIM OF LIEN", "MECHANIC'S LIEN", "NOTICE OF MECHANIC'S LIEN" -- whatever ${formData.state} requires)
-2. Include the proper statutory citation for ${formData.state}'s mechanic's lien statute
+1. Use the state-specific title (e.g., "CLAIM OF LIEN", "MECHANIC'S LIEN", "NOTICE OF MECHANIC'S LIEN" -- whatever ${state} requires)
+2. Include the proper statutory citation for ${state}'s mechanic's lien statute
 3. Include a proper verification/affidavit section
 4. Include a notary acknowledgment block
 5. Include a signature line for the claimant
@@ -48,22 +64,41 @@ FORMAT REQUIREMENTS:
 7. Include county recorder filing information where required
 
 Output the complete document text, ready to be formatted into a PDF.`;
+}
 
+export async function POST(request: Request) {
+  try {
+    const url = new URL(request.url);
+    const sessionId = url.searchParams.get("session_id");
+    let formData: Record<string, string>;
+    let sendCertified = false;
+
+    if (sessionId) {
+      const session = await getStripe().checkout.sessions.retrieve(sessionId);
+      if (session.payment_status !== "paid") {
+        return Response.json(
+          { error: "Payment not completed" },
+          { status: 402 }
+        );
+      }
+      const metadata = session.metadata || {};
+      formData = reassembleFormData(metadata);
+      sendCertified = metadata.sendCertified === "true";
+    } else {
+      formData = await request.json();
+    }
+
+    const anthropic = new Anthropic();
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
       max_tokens: 4096,
-      messages: [
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
+      messages: [{ role: "user", content: buildPrompt(formData) }],
     });
 
     const documentText =
       message.content[0].type === "text" ? message.content[0].text : "";
 
-    return Response.json({ document: documentText });
+    return Response.json({ document: documentText, sendCertified });
   } catch (error) {
     console.error("Document generation error:", error);
     return Response.json(

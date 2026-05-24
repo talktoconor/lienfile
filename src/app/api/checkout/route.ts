@@ -14,7 +14,9 @@ export async function POST(request: Request) {
     // Stripe metadata values are limited to 500 characters each.
     // Split the form data JSON across multiple metadata keys if needed.
     const formDataJson = JSON.stringify(formData);
-    const metadata: Record<string, string> = { tier };
+    const sendCertified =
+      tier === "lien-document" || tier === "full-protection" ? "true" : "false";
+    const metadata: Record<string, string> = { tier, sendCertified };
     const chunkSize = 490;
 
     if (formDataJson.length <= chunkSize) {
