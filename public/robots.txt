@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /lp/
+
+Sitemap: https://www.lienfile.io/sitemap.xml
